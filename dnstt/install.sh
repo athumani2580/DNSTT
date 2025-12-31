@@ -3,7 +3,7 @@
 # ============================================
 # SLOWDNS INSTALLATION SCRIPT
 # Version: 1.0
-# Author: VPN Script
+# Author: Alien Tz
 # ============================================
 
 # Color Codes
@@ -102,9 +102,9 @@ main() {
     
     # Download SlowDNS files
     print_message "Downloading SlowDNS server files..." "$BLUE"
-    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/dnstt-server
-    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/server.key
-    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/server.pub
+    wget -q https://raw.githubusercontent.com/ASHANTENNA/VPNScript/main/dnstt-server
+    wget -q https://raw.githubusercontent.com/ASHANTENNA/VPNScript/main/server.key
+    wget -q https://raw.githubusercontent.com/ASHANTENNA/VPNScript/main/server.pub
     
     # Set permissions
     chmod 755 dnstt-server
@@ -125,10 +125,14 @@ main() {
     iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
     iptables-save > /etc/iptables/rules.v4
     
-    print_message "Using target UDP port: $TARGET_PORT" "$GREEN"
+    print_message "Using target port: $TARGET_PORT" "$GREEN"
     print_message "Using systemd service (foreground mode)" "$GREEN"
     
-    # Create systemd service - Using UDP
+    # Test the dnstt-server command first
+    print_message "Testing dnstt-server command..." "$BLUE"
+    ./dnstt-server --help 2>&1 | head -20
+    
+    # Create systemd service - REMOVED udp:// prefix
     print_message "Creating systemd service for SlowDNS..." "$BLUE"
     
     cat > /etc/systemd/system/dnstt.service << EOF
@@ -141,7 +145,7 @@ Wants=network.target
 Type=simple
 User=root
 WorkingDirectory=/root/dnstt
-ExecStart=/root/dnstt/dnstt-server -udp :5300 -privkey-file /root/dnstt/server.key $ns udp://127.0.0.1:$TARGET_PORT
+ExecStart=/root/dnstt/dnstt-server -udp :5300 -privkey-file /root/dnstt/server.key $ns 127.0.0.1:$TARGET_PORT
 Restart=always
 RestartSec=3
 StandardOutput=syslog
@@ -161,19 +165,26 @@ EOF
     print_message "To check status: systemctl status dnstt" "$YELLOW"
     print_message "To view logs: journalctl -u dnstt -f" "$YELLOW"
     
+    # Wait a bit and check status
+    print_message "Checking service status..." "$BLUE"
+    sleep 3
+    
+    systemctl status dnstt --no-pager
+    
     # Verify installation
     print_message "Verifying SlowDNS installation..." "$BLUE"
-    sleep 2
     
     if lsof -i :5300 > /dev/null 2>&1; then
-        print_message "SlowDNS is running on port 5300!" "$GREEN"
+        print_message "✓ SlowDNS is running on port 5300!" "$GREEN"
     else
-        print_message "Warning: SlowDNS might not be running. Check manually." "$RED"
+        print_message "✗ SlowDNS is NOT running on port 5300" "$RED"
+        print_message "Checking service logs..." "$YELLOW"
+        journalctl -u dnstt -n 20 --no-pager
     fi
     
     print_message "======================================" "$GREEN"
     print_message "Installation completed!" "$GREEN"
-    print_message "Target UDP port: $TARGET_PORT" "$BLUE"
+    print_message "Target port: $TARGET_PORT" "$BLUE"
     print_message "Nameserver: $ns" "$BLUE"
     print_message "Service: systemd (dnstt)" "$BLUE"
     print_message "IPv6: Disabled" "$BLUE"
