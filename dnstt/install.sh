@@ -3,7 +3,7 @@
 # ============================================
 # SLOWDNS INSTALLATION SCRIPT
 # Version: 1.0
-# Author: Alien Tz
+# Author: VPN Script
 # ============================================
 
 # Color Codes
@@ -53,6 +53,56 @@ EOF
     print_message "IPv6 disabled successfully!" "$GREEN"
 }
 
+# Function to check if port is in use
+check_port() {
+    local port=$1
+    if lsof -i :$port > /dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to test DNS
+test_dns() {
+    print_message "Testing DNS configuration..." "$BLUE"
+    
+    # Test 1: Check if dnstt-server is listening
+    print_message "1. Checking if dnstt-server is listening..." "$YELLOW"
+    if check_port 5300; then
+        print_message "   ✓ dnstt-server is listening on port 5300" "$GREEN"
+        lsof -i :5300
+    else
+        print_message "   ✗ dnstt-server is NOT listening on port 5300" "$RED"
+    fi
+    
+    # Test 2: Check iptables rules
+    print_message "2. Checking iptables rules..." "$YELLOW"
+    echo "NAT rules:"
+    iptables -t nat -L -n -v | grep -A5 PREROUTING
+    echo ""
+    echo "INPUT rules:"
+    iptables -L INPUT -n -v | grep 5300
+    
+    # Test 3: Test DNS query to port 5300
+    print_message "3. Testing DNS query to port 5300..." "$YELLOW"
+    dig @127.0.0.1 -p 5300 google.com +short +time=2 +tries=1 2>/dev/null
+    if [ $? -eq 0 ]; then
+        print_message "   ✓ DNS query to port 5300 works" "$GREEN"
+    else
+        print_message "   ✗ DNS query to port 5300 failed" "$RED"
+    fi
+    
+    # Test 4: Test DNS query to port 53
+    print_message "4. Testing DNS query to port 53..." "$YELLOW"
+    dig @127.0.0.1 google.com +short +time=2 +tries=1 2>/dev/null
+    if [ $? -eq 0 ]; then
+        print_message "   ✓ DNS query to port 53 works" "$GREEN"
+    else
+        print_message "   ✗ DNS query to port 53 failed" "$RED"
+    fi
+}
+
 # Main script execution
 main() {
     # Check if running as root
@@ -75,7 +125,7 @@ main() {
     apt -y update && apt -y upgrade
     
     print_message "Installing required packages..." "$BLUE"
-    apt -y install iptables-persistent wget screen lsof
+    apt -y install iptables-persistent wget screen lsof dnsutils
     
     # Disable IPv6
     disable_ipv6
@@ -119,20 +169,44 @@ main() {
     # Get nameserver
     read -p "Enter your Nameserver (e.g., ns1.yourdomain.com): " ns
     
+    # Stop any existing service
+    systemctl stop dnstt 2>/dev/null
+    
+    # Clear existing iptables rules for ports 53 and 5300
+    print_message "Clearing existing iptables rules..." "$BLUE"
+    iptables -D INPUT -p udp --dport 5300 -j ACCEPT 2>/dev/null
+    iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null
+    
     # Configure iptables for SlowDNS
     print_message "Configuring firewall rules..." "$BLUE"
     iptables -I INPUT -p udp --dport 5300 -j ACCEPT
-    iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
+    iptables -t nat -I PREROUTING -i eth0 -p udp --dport 53 -j REDIRECT --to-ports 5300
+    
+    # Also allow TCP for DNS if needed
+    iptables -I INPUT -p tcp --dport 5300 -j ACCEPT
+    iptables -t nat -I PREROUTING -i eth0 -p tcp --dport 53 -j REDIRECT --to-ports 5300
+    
     iptables-save > /etc/iptables/rules.v4
     
     print_message "Using target port: $TARGET_PORT" "$GREEN"
     print_message "Using systemd service (foreground mode)" "$GREEN"
     
     # Test the dnstt-server command first
-    print_message "Testing dnstt-server command..." "$BLUE"
-    ./dnstt-server --help 2>&1 | head -20
+    print_message "Testing dnstt-server..." "$BLUE"
+    timeout 5 ./dnstt-server -udp :5300 -privkey-file server.key $ns 127.0.0.1:$TARGET_PORT &
+    test_pid=$!
+    sleep 2
     
-    # Create systemd service - REMOVED udp:// prefix
+    if check_port 5300; then
+        print_message "✓ dnstt-server test successful" "$GREEN"
+        kill $test_pid 2>/dev/null
+        sleep 1
+    else
+        print_message "✗ dnstt-server test failed" "$RED"
+        kill $test_pid 2>/dev/null
+    fi
+    
+    # Create systemd service
     print_message "Creating systemd service for SlowDNS..." "$BLUE"
     
     cat > /etc/systemd/system/dnstt.service << EOF
@@ -165,22 +239,15 @@ EOF
     print_message "To check status: systemctl status dnstt" "$YELLOW"
     print_message "To view logs: journalctl -u dnstt -f" "$YELLOW"
     
-    # Wait a bit and check status
-    print_message "Checking service status..." "$BLUE"
+    # Wait for service to start
+    print_message "Waiting for service to start..." "$BLUE"
     sleep 3
     
+    # Check service status
     systemctl status dnstt --no-pager
     
-    # Verify installation
-    print_message "Verifying SlowDNS installation..." "$BLUE"
-    
-    if lsof -i :5300 > /dev/null 2>&1; then
-        print_message "✓ SlowDNS is running on port 5300!" "$GREEN"
-    else
-        print_message "✗ SlowDNS is NOT running on port 5300" "$RED"
-        print_message "Checking service logs..." "$YELLOW"
-        journalctl -u dnstt -n 20 --no-pager
-    fi
+    # Run comprehensive tests
+    test_dns
     
     print_message "======================================" "$GREEN"
     print_message "Installation completed!" "$GREEN"
@@ -189,6 +256,12 @@ EOF
     print_message "Service: systemd (dnstt)" "$BLUE"
     print_message "IPv6: Disabled" "$BLUE"
     print_message "======================================" "$GREEN"
+    
+    print_message "Troubleshooting tips:" "$YELLOW"
+    print_message "1. Check if port 53 is being used by other service: lsof -i :53" "$YELLOW"
+    print_message "2. Check iptables rules: iptables -t nat -L -n -v" "$YELLOW"
+    print_message "3. Test directly: dig @127.0.0.1 -p 5300 google.com" "$YELLOW"
+    print_message "4. Check logs: journalctl -u dnstt -n 20" "$YELLOW"
     
     print_message "System reboot is recommended for IPv6 changes to take full effect!" "$YELLOW"
     
