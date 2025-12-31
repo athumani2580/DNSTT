@@ -63,6 +63,32 @@ check_port() {
     fi
 }
 
+# Function to configure iptables properly
+configure_iptables() {
+    print_message "Configuring iptables for DNS redirection..." "$BLUE"
+    
+    # Remove any existing rules first
+    iptables -t nat -F
+    iptables -F INPUT
+    
+    # Allow DNS traffic on port 5300
+    iptables -I INPUT -p udp --dport 5300 -j ACCEPT
+    iptables -I INPUT -p tcp --dport 5300 -j ACCEPT
+    
+    # Redirect incoming DNS traffic from external sources
+    iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-port 5300
+    iptables -t nat -I PREROUTING -p tcp --dport 53 -j REDIRECT --to-port 5300
+    
+    # CRITICAL: Redirect local DNS traffic (127.0.0.1) - OUTPUT chain
+    iptables -t nat -I OUTPUT -p udp --dport 53 -j REDIRECT --to-port 5300
+    iptables -t nat -I OUTPUT -p tcp --dport 53 -j REDIRECT --to-port 5300
+    
+    # Save rules
+    iptables-save > /etc/iptables/rules.v4
+    
+    print_message "Iptables configured with OUTPUT chain rules!" "$GREEN"
+}
+
 # Function to test DNS
 test_dns() {
     print_message "Testing DNS configuration..." "$BLUE"
@@ -78,28 +104,36 @@ test_dns() {
     
     # Test 2: Check iptables rules
     print_message "2. Checking iptables rules..." "$YELLOW"
-    echo "NAT rules:"
-    iptables -t nat -L -n -v | grep -A5 PREROUTING
+    echo "NAT OUTPUT rules (for local traffic):"
+    iptables -t nat -L OUTPUT -n -v
     echo ""
-    echo "INPUT rules:"
-    iptables -L INPUT -n -v | grep 5300
+    echo "NAT PREROUTING rules (for external traffic):"
+    iptables -t nat -L PREROUTING -n -v
     
-    # Test 3: Test DNS query to port 5300
-    print_message "3. Testing DNS query to port 5300..." "$YELLOW"
-    dig @127.0.0.1 -p 5300 google.com +short +time=2 +tries=1 2>/dev/null
-    if [ $? -eq 0 ]; then
-        print_message "   ✓ DNS query to port 5300 works" "$GREEN"
-    else
+    # Test 3: Test DNS query to port 5300 directly
+    print_message "3. Testing DNS query to port 5300 (direct)..." "$YELLOW"
+    result=$(dig @127.0.0.1 -p 5300 google.com +short +time=2 +tries=1 2>&1)
+    if echo "$result" | grep -q "connection refused"; then
         print_message "   ✗ DNS query to port 5300 failed" "$RED"
+        echo "   Error: $result"
+    elif [ -n "$result" ]; then
+        print_message "   ✓ DNS query to port 5300 works" "$GREEN"
+        echo "   Response: $result"
+    else
+        print_message "   ⚠ DNS query to port 5300 timed out" "$YELLOW"
     fi
     
-    # Test 4: Test DNS query to port 53
-    print_message "4. Testing DNS query to port 53..." "$YELLOW"
-    dig @127.0.0.1 google.com +short +time=2 +tries=1 2>/dev/null
-    if [ $? -eq 0 ]; then
-        print_message "   ✓ DNS query to port 53 works" "$GREEN"
-    else
+    # Test 4: Test DNS query to port 53 (should redirect to 5300)
+    print_message "4. Testing DNS query to port 53 (should redirect)..." "$YELLOW"
+    result=$(dig @127.0.0.1 google.com +short +time=3 +tries=2 2>&1)
+    if echo "$result" | grep -q "connection refused"; then
         print_message "   ✗ DNS query to port 53 failed" "$RED"
+        echo "   Error: $result"
+    elif [ -n "$result" ]; then
+        print_message "   ✓ DNS query to port 53 works (redirected to 5300)" "$GREEN"
+        echo "   Response: $result"
+    else
+        print_message "   ⚠ DNS query to port 53 timed out" "$YELLOW"
     fi
 }
 
@@ -130,14 +164,38 @@ main() {
     # Disable IPv6
     disable_ipv6
     
-    # Disable systemd-resolved
-    print_message "Disabling systemd-resolved..." "$YELLOW"
+    # Disable systemd-resolved and stop any DNS services
+    print_message "Stopping DNS services..." "$YELLOW"
     
+    # Stop all possible DNS services
     systemctl stop systemd-resolved 2>/dev/null
     systemctl disable systemd-resolved 2>/dev/null
     systemctl mask systemd-resolved 2>/dev/null
-    pkill -9 systemd-resolved 2>/dev/null
     
+    systemctl stop dnsmasq 2>/dev/null
+    systemctl disable dnsmasq 2>/dev/null
+    
+    systemctl stop bind9 2>/dev/null
+    systemctl disable bind9 2>/dev/null
+    
+    systemctl stop named 2>/dev/null
+    systemctl disable named 2>/dev/null
+    
+    # Kill any processes using port 53
+    pkill -9 systemd-resolved 2>/dev/null
+    pkill -9 dnsmasq 2>/dev/null
+    pkill -9 named 2>/dev/null
+    
+    # Check if port 53 is still in use
+    if check_port 53; then
+        print_message "Warning: Port 53 is still in use!" "$RED"
+        lsof -i :53
+        print_message "Killing processes on port 53..." "$YELLOW"
+        fuser -k 53/udp 2>/dev/null
+        fuser -k 53/tcp 2>/dev/null
+    fi
+    
+    # Set DNS resolvers
     rm -f /etc/resolv.conf
     echo "nameserver 8.8.8.8" > /etc/resolv.conf
     echo "nameserver 1.1.1.1" >> /etc/resolv.conf
@@ -169,29 +227,16 @@ main() {
     # Get nameserver
     read -p "Enter your Nameserver (e.g., ns1.yourdomain.com): " ns
     
-    # Stop any existing service
+    # Stop any existing dnstt service
     systemctl stop dnstt 2>/dev/null
     
-    # Clear existing iptables rules for ports 53 and 5300
-    print_message "Clearing existing iptables rules..." "$BLUE"
-    iptables -D INPUT -p udp --dport 5300 -j ACCEPT 2>/dev/null
-    iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null
-    
-    # Configure iptables for SlowDNS
-    print_message "Configuring firewall rules..." "$BLUE"
-    iptables -I INPUT -p udp --dport 5300 -j ACCEPT
-    iptables -t nat -I PREROUTING -i eth0 -p udp --dport 53 -j REDIRECT --to-ports 5300
-    
-    # Also allow TCP for DNS if needed
-    iptables -I INPUT -p tcp --dport 5300 -j ACCEPT
-    iptables -t nat -I PREROUTING -i eth0 -p tcp --dport 53 -j REDIRECT --to-ports 5300
-    
-    iptables-save > /etc/iptables/rules.v4
+    # Configure iptables
+    configure_iptables
     
     print_message "Using target port: $TARGET_PORT" "$GREEN"
     print_message "Using systemd service (foreground mode)" "$GREEN"
     
-    # Test the dnstt-server command first
+    # Test the dnstt-server command
     print_message "Testing dnstt-server..." "$BLUE"
     timeout 5 ./dnstt-server -udp :5300 -privkey-file server.key $ns 127.0.0.1:$TARGET_PORT &
     test_pid=$!
@@ -236,8 +281,6 @@ EOF
     systemctl enable dnstt
     
     print_message "SlowDNS service created and started!" "$GREEN"
-    print_message "To check status: systemctl status dnstt" "$YELLOW"
-    print_message "To view logs: journalctl -u dnstt -f" "$YELLOW"
     
     # Wait for service to start
     print_message "Waiting for service to start..." "$BLUE"
@@ -257,11 +300,9 @@ EOF
     print_message "IPv6: Disabled" "$BLUE"
     print_message "======================================" "$GREEN"
     
-    print_message "Troubleshooting tips:" "$YELLOW"
-    print_message "1. Check if port 53 is being used by other service: lsof -i :53" "$YELLOW"
-    print_message "2. Check iptables rules: iptables -t nat -L -n -v" "$YELLOW"
-    print_message "3. Test directly: dig @127.0.0.1 -p 5300 google.com" "$YELLOW"
-    print_message "4. Check logs: journalctl -u dnstt -n 20" "$YELLOW"
+    print_message "IMPORTANT: Local DNS queries (127.0.0.1:53) should now work!" "$YELLOW"
+    print_message "Test with: dig @127.0.0.1 google.com" "$YELLOW"
+    print_message "Or test with: nslookup google.com 127.0.0.1" "$YELLOW"
     
     print_message "System reboot is recommended for IPv6 changes to take full effect!" "$YELLOW"
     
