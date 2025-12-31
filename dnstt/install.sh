@@ -210,9 +210,9 @@ main() {
     
     # Download SlowDNS files
     print_message "Downloading SlowDNS server files..." "$BLUE"
-    wget -q https://raw.githubusercontent.com/ASHANTENNA/VPNScript/main/dnstt-server
-    wget -q https://raw.githubusercontent.com/ASHANTENNA/VPNScript/main/server.key
-    wget -q https://raw.githubusercontent.com/ASHANTENNA/VPNScript/main/server.pub
+    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/dnstt-server
+    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/mai//server.key
+    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/server.pub
     
     # Set permissions
     chmod 755 dnstt-server
