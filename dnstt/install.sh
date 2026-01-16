@@ -1,232 +1,103 @@
 #!/bin/bash
 
-# Color Codes
-RED='\033[0;31m'
-GREEN='\033[0;32m'
+# Color definitions
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
+RED='\033[1;31m'
+CYAN='\033[1;36m'
+GREEN='\033[1;32m'
 NC='\033[0m'
 
-print_message() {
-    echo -e "${2}${1}${NC}"
-}
+# Check if running as root
+if [ "$(whoami)" != "root" ]; then
+    echo -e "${RED}Error: This script must be run as root.${NC}"
+    exit 1
+fi
 
+# Function to check if input is a number
 is_number() {
-    local num=$1
-    [[ $num =~ ^[0-9]+$ ]]
+    [[ $1 =~ ^[0-9]+$ ]]
 }
 
-validate_port() {
-    local port=$1
-    if is_number "$port" && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-check_port() {
-    local port=$1
-    if lsof -i :$port > /dev/null 2>&1; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-install_dependencies() {
-    print_message "Installing dependencies..." "$BLUE"
-    apt -y update && apt -y upgrade
-    apt -y install iptables-persistent wget screen lsof dnsutils
-}
-
-disable_ipv6() {
-    print_message "Disabling IPv6..." "$YELLOW"
-    
-    echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
-    sysctl -w net.ipv6.conf.all.disable_ipv6=1 > /dev/null 2>&1
-    
-    cat >> /etc/sysctl.conf << EOF
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.lo.disable_ipv6 = 1
-EOF
-    
-    sysctl -p > /dev/null 2>&1
-    
-    if [ -f /etc/default/grub ]; then
-        sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/&ipv6.disable=1 /' /etc/default/grub
-        sed -i 's/GRUB_CMDLINE_LINUX="/&ipv6.disable=1 /' /etc/default/grub
-        update-grub 2>/dev/null || true
-    fi
-    
-    cat >> /etc/modprobe.d/disable-ipv6.conf << EOF
-install ipv6 /bin/true
-blacklist ipv6
-alias net-pf-10 off
-alias ipv6 off
-options ipv6 disable=1
-EOF
-}
-
-configure_iptables() {
-    print_message "Configuring iptables..." "$BLUE"
-    
-    iptables -t nat -F
-    iptables -F INPUT
-    
-    iptables -I INPUT -p udp --dport 5300 -j ACCEPT
-    iptables -I INPUT -p tcp --dport 5300 -j ACCEPT
-    
-    iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-port 5300
-    iptables -t nat -I PREROUTING -p tcp --dport 53 -j REDIRECT --to-port 5300
-    
-    iptables -t nat -I OUTPUT -p udp --dport 53 -j REDIRECT --to-port 5300
-    iptables -t nat -I OUTPUT -p tcp --dport 53 -j REDIRECT --to-port 5300
-    
-    iptables-save > /etc/iptables/rules.v4
-}
-
-disable_systemd_resolved() {
-    print_message "Disabling systemd-resolved..." "$YELLOW"
-    
-    systemctl stop systemd-resolved 2>/dev/null
-    systemctl disable systemd-resolved 2>/dev/null
-    systemctl mask systemd-resolved 2>/dev/null
-    
-    systemctl stop dnsmasq 2>/dev/null
-    systemctl disable dnsmasq 2>/dev/null
-    systemctl stop bind9 2>/dev/null
-    systemctl disable bind9 2>/dev/null
-    systemctl stop named 2>/dev/null
-    systemctl disable named 2>/dev/null
-    
-    pkill -9 systemd-resolved 2>/dev/null
-    pkill -9 dnsmasq 2>/dev/null
-    pkill -9 named 2>/dev/null
-    
-    if check_port 53; then
-        fuser -k 53/udp 2>/dev/null
-        fuser -k 53/tcp 2>/dev/null
-    fi
-    
-    rm -f /etc/resolv.conf
-    echo "nameserver 8.8.8.8" > /etc/resolv.conf
-    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
-    
-    chattr +i /etc/resolv.conf 2>/dev/null || true
-}
-
-configure_openssh() {
-    print_message "Configuring OpenSSH..." "$YELLOW"
-    
-    SSHD_PORT="22"
-    current_port=$(grep -E "^Port\s+[0-9]+" /etc/ssh/sshd_config | awk '{print $2}' 2>/dev/null || echo "22")
-    
-    if [ "$current_port" != "22" ]; then
-        SSHD_PORT="$current_port"
-    else
-        read -p "Change SSH port from 22? (y/n): " change_ssh
-        
-        if [[ "$change_ssh" =~ ^[Yy]$ ]]; then
-            while true; do
-                read -p "Enter new SSH port (not 5300): " ssh_port
-                
-                if validate_port "$ssh_port"; then
-                    if [ "$ssh_port" -eq 5300 ]; then
-                        print_message "Port 5300 reserved for SlowDNS" "$RED"
-                        continue
-                    fi
-                    SSHD_PORT="$ssh_port"
-                    break
-                else
-                    print_message "Invalid port" "$RED"
-                fi
-            done
-        fi
-    fi
-    
-    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup 2>/dev/null
-    
-    cat > /etc/ssh/sshd_config << EOF
-Port $SSHD_PORT
-Protocol 2
-PermitRootLogin yes
-PubkeyAuthentication yes
-PasswordAuthentication yes
-PermitEmptyPasswords no
-ChallengeResponseAuthentication no
-UsePAM yes
-X11Forwarding no
-PrintMotd no
-PrintLastLog yes
-TCPKeepAlive yes
-ClientAliveInterval 60
-ClientAliveCountMax 3
-AllowTcpForwarding yes
-GatewayPorts yes
-Compression delayed
-Subsystem sftp /usr/lib/openssh/sftp-server
-MaxSessions 100
-MaxStartups 100:30:200
-LoginGraceTime 30
-UseDNS no
-EOF
-    
-    iptables -I INPUT -p tcp --dport "$SSHD_PORT" -j ACCEPT
-    iptables-save > /etc/iptables/rules.v4
-    
-    systemctl restart sshd
-    systemctl enable sshd > /dev/null 2>&1
-}
-
+# Main installation function
 install_slowdns() {
-    print_message "Installing SlowDNS..." "$BLUE"
+    echo -e "${YELLOW}Installing DNSTT (SlowDNS)...${NC}"
     
-    TARGET_PORT="22"
+    # Update system
+    apt -y update && apt -y upgrade
+    apt -y install iptables-persistent wget screen lsof
     
+    # Create directory for DNSTT
     rm -rf /root/dnstt
-    mkdir -p /root/dnstt
-    cd /root/dnstt || exit 1
+    mkdir /root/dnstt
+    cd /root/dnstt
     
-    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/dnstt-server
-    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/server.key
-    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/server.pub
-    
+    # Download DNSTT server binary
+    echo -e "${YELLOW}Downloading DNSTT server...${NC}"
+    wget -q https://raw.githubusercontent.com/ASHANTENNA/VPNScript/main/dnstt-server
     chmod 755 dnstt-server
     
-    print_message "Public Key:" "$YELLOW"
+    # Download server keys
+    echo -e "${YELLOW}Downloading server keys...${NC}"
+    wget -q https://raw.githubusercontent.com/ASHANTENNA/VPNScript/main/server.key
+    wget -q https://raw.githubusercontent.com/ASHANTENNA/VPNScript/main/server.pub
+    
+    # Display public key
+    echo -e "${GREEN}Public Key:${NC}"
     cat server.pub
-    read -p "Copy key and press Enter"
+    echo ""
     
-    read -p "Enter Nameserver: " ns
+    # Get nameserver from user
+    while true; do
+        echo -e "${YELLOW}"
+        read -p "Enter your Nameserver (e.g., ns.example.com): " ns
+        echo -e "${NC}"
+        if [ ! -z "$ns" ]; then
+            break
+        fi
+    done
     
-    systemctl stop dnstt 2>/dev/null
+    # Get target port
+    while true; do
+        echo -e "${YELLOW}"
+        read -p "Target TCP Port (where traffic will be forwarded): " target_port
+        echo -e "${NC}"
+        if is_number "$target_port" && [ "$target_port" -ge 1 ] && [ "$target_port" -le 65535 ]; then
+            break
+        else
+            echo -e "${YELLOW}Invalid input. Please enter a valid number between 1 and 65535.${NC}"
+        fi
+    done
     
-    configure_iptables
+    # Configure iptables
+    echo -e "${YELLOW}Configuring firewall rules...${NC}"
+    iptables -I INPUT -p udp --dport 5300 -j ACCEPT
+    iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
+    iptables-save > /etc/iptables/rules.v4
     
-    timeout 5 ./dnstt-server -udp :5300 -privkey-file server.key $ns 127.0.0.1:$TARGET_PORT &
-    test_pid=$!
-    sleep 2
+    # Ask for service type
+    echo -e "${YELLOW}"
+    read -p "Run as system service or in screen session? (s/c): " service_type
+    echo -e "${NC}"
     
-    if check_port 5300; then
-        kill $test_pid 2>/dev/null
-        sleep 1
+    if [ "$service_type" = "c" ] || [ "$service_type" = "C" ]; then
+        # Run in screen session
+        echo -e "${YELLOW}Starting DNSTT in screen session...${NC}"
+        screen -dmS slowdns ./dnstt-server -udp :5300 -privkey-file server.key "$ns" 127.0.0.1:"$target_port"
+        echo -e "${GREEN}DNSTT started in screen session 'slowdns'${NC}"
     else
-        kill $test_pid 2>/dev/null
-    fi
-    
-    cat > /etc/systemd/system/dnstt.service << EOF
+        # Create systemd service
+        echo -e "${YELLOW}Creating systemd service...${NC}"
+        cat > /etc/systemd/system/dnstt.service << EOF
 [Unit]
-Description=DNSTT Tunnel Server
-After=network.target
+Description=DNSTT SlowDNS Tunnel Server
 Wants=network.target
+After=network.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/root/dnstt
-ExecStart=/root/dnstt/dnstt-server -udp :5300 -mtu 1800 -privkey-file /root/dnstt/server.key $ns 127.0.0.1:$TARGET_PORT
+ExecStart=/root/dnstt/dnstt-server -udp :5300 -privkey-file /root/dnstt/server.key $ns 127.0.0.1:$target_port
 Restart=always
 RestartSec=3
 StandardOutput=syslog
@@ -236,61 +107,157 @@ SyslogIdentifier=dnstt
 [Install]
 WantedBy=multi-user.target
 EOF
+        
+        # Enable and start service
+        systemctl daemon-reload
+        systemctl start dnstt
+        systemctl enable dnstt
+        
+        echo -e "${GREEN}DNSTT service created and started${NC}"
+    fi
     
-    systemctl daemon-reload
-    systemctl start dnstt
-    systemctl enable dnstt
-    
-    sleep 3
-}
-
-test_dns() {
-    print_message "Testing DNS..." "$BLUE"
-    
-    if timeout 3 dig @127.0.0.1 -p 5300 google.com +short >/dev/null 2>&1; then
-        print_message "Port 5300 working" "$GREEN"
+    # Show status
+    echo ""
+    echo -e "${GREEN}=== Installation Complete ===${NC}"
+    echo ""
+    echo -e "${YELLOW}Service Status:${NC}"
+    if [ "$service_type" = "c" ] || [ "$service_type" = "C" ]; then
+        screen -ls | grep slowdns
     else
-        print_message "Port 5300 failed" "$RED"
+        systemctl status dnstt --no-pager -l
     fi
     
-    if timeout 3 dig @127.0.0.1 google.com +short >/dev/null 2>&1; then
-        print_message "Port 53 working" "$GREEN"
-    else
-        print_message "Port 53 failed" "$RED"
-    fi
-}
-
-main() {
-    if [ "$EUID" -ne 0 ]; then
-        print_message "Run as root" "$RED"
-        exit 1
-    fi
+    echo ""
+    echo -e "${YELLOW}Listening Ports:${NC}"
+    lsof -i :5300
     
-    install_dependencies
-    configure_openssh
-    disable_ipv6
-    disable_systemd_resolved
-    install_slowdns
-    test_dns
+    echo ""
+    echo -e "${GREEN}Configuration Summary:${NC}"
+    echo "Nameserver: $ns"
+    echo "Public Key: $(cat server.pub)"
+    echo "Target Port: $target_port"
+    echo "DNS Port: 5300 (UDP)"
+    echo ""
+    echo -e "${YELLOW}Important:${NC}"
+    echo "1. Make sure to use the public key above in your client configuration"
+    echo "2. DNS queries on port 53 are redirected to port 5300"
+    echo "3. Check if service is running with: systemctl status dnstt"
+    echo ""
 }
 
-main
+# Management function
+manage_slowdns() {
+    while true; do
+        clear
+        echo -e "${CYAN}=== SlowDNS Management ===${NC}"
+        echo ""
+        echo "1. Start DNSTT service"
+        echo "2. Stop DNSTT service"
+        echo "3. Restart DNSTT service"
+        echo "4. Check service status"
+        echo "5. View logs"
+        echo "6. Kill screen session (if running in screen)"
+        echo "7. Show public key"
+        echo "8. Back to main menu"
+        echo ""
+        
+        read -p "Select option [1-8]: " choice
+        
+        case $choice in
+            1)
+                systemctl start dnstt
+                echo -e "${GREEN}DNSTT service started${NC}"
+                sleep 2
+                ;;
+            2)
+                systemctl stop dnstt
+                echo -e "${YELLOW}DNSTT service stopped${NC}"
+                sleep 2
+                ;;
+            3)
+                systemctl restart dnstt
+                echo -e "${GREEN}DNSTT service restarted${NC}"
+                sleep 2
+                ;;
+            4)
+                echo -e "${YELLOW}Service Status:${NC}"
+                systemctl status dnstt --no-pager -l
+                echo ""
+                echo -e "${YELLOW}Press Enter to continue...${NC}"
+                read
+                ;;
+            5)
+                echo -e "${YELLOW}Service Logs:${NC}"
+                journalctl -u dnstt -n 20 --no-pager
+                echo ""
+                echo -e "${YELLOW}Press Enter to continue...${NC}"
+                read
+                ;;
+            6)
+                screen -X -S slowdns quit
+                echo -e "${YELLOW}Screen session 'slowdns' killed${NC}"
+                sleep 2
+                ;;
+            7)
+                echo -e "${GREEN}Public Key:${NC}"
+                cat /root/dnstt/server.pub 2>/dev/null || echo "Public key not found"
+                echo ""
+                echo -e "${YELLOW}Press Enter to continue...${NC}"
+                read
+                ;;
+            8)
+                break
+                ;;
+            *)
+                echo -e "${RED}Invalid option${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
 
-echo "🔐 DNS Installer - Token Required"
-echo ""
-
-# Get GitHub token
-read -p "Enter GitHub token: " token
-
-if [ -z "$token" ]; then
-    echo "❌ Error: Token cannot be empty!"
-    exit 1
-fi
-
-echo "📦 Installing..."
-echo ""
-
-# Try to download and execute directly
-bash <(curl -s -H "Authorization: token $token" \
-    -H "Accept: application/vnd.github.v3.raw" \
-    "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/activate.sh")
+# Main menu
+while true; do
+    clear
+    echo -e "${YELLOW}SlowDNS (DNSTT) Installer${NC}"
+    echo "Version: 1.0"
+    echo ""
+    echo "1. Install SlowDNS (DNSTT)"
+    echo "2. Manage SlowDNS Service"
+    echo "3. Uninstall SlowDNS"
+    echo "4. Exit"
+    echo ""
+    
+    read -p "Select option [1-4]: " main_choice
+    
+    case $main_choice in
+        1)
+            install_slowdns
+            echo ""
+            echo -e "${YELLOW}Press Enter to return to main menu...${NC}"
+            read
+            ;;
+        2)
+            manage_slowdns
+            ;;
+        3)
+            echo -e "${YELLOW}Uninstalling SlowDNS...${NC}"
+            systemctl stop dnstt 2>/dev/null
+            systemctl disable dnstt 2>/dev/null
+            rm -f /etc/systemd/system/dnstt.service
+            screen -X -S slowdns quit 2>/dev/null
+            rm -rf /root/dnstt
+            systemctl daemon-reload
+            echo -e "${GREEN}SlowDNS uninstalled successfully${NC}"
+            sleep 2
+            ;;
+        4)
+            echo -e "${YELLOW}Goodbye!${NC}"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Invalid option${NC}"
+            sleep 1
+            ;;
+    esac
+done
