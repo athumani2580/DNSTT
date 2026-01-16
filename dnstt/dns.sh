@@ -85,21 +85,21 @@ print_success "SlowDNS directory created"
 
 # Download files
 print_warning "Downloading SlowDNS files..."
-wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/athumani2580/vps/main/slowdns/server.key"
+wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/athumani2580/DNSTT/main/server.key"
 if [ $? -eq 0 ]; then
     print_success "server.key downloaded"
 else
     print_error "Failed to download server.key"
 fi
 
-wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/athumani2580/vps/main/slowdns/server.pub"
+wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/athumani2580/DNSTT/main/server.pub"
 if [ $? -eq 0 ]; then
     print_success "server.pub downloaded"
 else
     print_error "Failed to download server.pub"
 fi
 
-wget -q -O /etc/slowdns/dnstt-server "https://raw.githubusercontent.com/athumani2580/vps/main/slowdns/dnstt-server"
+wget -q -O /etc/slowdns/dnstt-server "https://raw.githubusercontent.com/athumani2580/DNSTT/main/dnstt-server"
 if [ $? -eq 0 ]; then
     print_success "dnstt-server downloaded"
 else
