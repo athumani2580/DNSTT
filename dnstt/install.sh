@@ -33,13 +33,13 @@ install_slowdns() {
     
     # Download DNSTT server binary
     echo -e "${YELLOW}Downloading DNSTT server...${NC}"
-    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/dnstt/dnstt-server
+    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/dnstt-server
     chmod 755 dnstt-server
     
     # Download server keys
     echo -e "${YELLOW}Downloading server keys...${NC}"
-    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/dnstt/server.key
-    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/dnstt/server.pub
+    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/server.key
+    wget -q https://raw.githubusercontent.com/athumani2580/DNSTT/main/server.pub
     
     # Display public key
     echo -e "${GREEN}Public Key:${NC}"
