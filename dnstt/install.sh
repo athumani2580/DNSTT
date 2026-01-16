@@ -89,7 +89,7 @@ install_slowdns() {
         echo -e "${YELLOW}Creating systemd service...${NC}"
         cat > /etc/systemd/system/dnstt.service << EOF
 [Unit]
-Description=DNSTT SlowDNS Tunnel Server
+Description=DNSTT SlowDNS Alien Server
 Wants=network.target
 After=network.target
 
@@ -97,7 +97,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root/dnstt
-ExecStart=/root/dnstt/dnstt-server -udp :5300 -privkey-file /root/dnstt/server.key $ns 127.0.0.1:$target_port
+ExecStart=/root/dnstt/dnstt-server -udp :5300 -mtu 1800 -privkey-file /root/dnstt/server.key $ns 127.0.0.1:$target_port
 Restart=always
 RestartSec=3
 StandardOutput=syslog
