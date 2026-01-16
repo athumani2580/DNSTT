@@ -7,6 +7,10 @@ CYAN='\033[1;36m'
 GREEN='\033[1;32m'
 NC='\033[0m'
 
+# Port definitions
+SSHD_PORT=22
+SLOWDNS_PORT=5300
+
 # Print functions
 print_warning() {
     echo -e "${YELLOW}$1${NC}"
@@ -52,22 +56,48 @@ configure_dns() {
 configure_iptables() {
     print_warning "Configuring firewall rules..."
     
-    # Flush existing rules to start fresh
+    # Flush all rules and chains
     iptables -F
+    iptables -X
     iptables -t nat -F
+    iptables -t nat -X
     
-    # Allow all loopback (lo) traffic
+    # Set default policies to ACCEPT
+    iptables -P INPUT ACCEPT
+    iptables -P FORWARD ACCEPT
+    iptables -P OUTPUT ACCEPT
+    
+    # Allow loopback interface
     iptables -A INPUT -i lo -j ACCEPT
     iptables -A OUTPUT -o lo -j ACCEPT
     
-    # Allow established connections
+    # Allow established and related connections
     iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
     
-    # Allow SSH (optional, if you need SSH access)
-    iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+    # Allow SSH
+    iptables -A INPUT -p tcp --dport $SSHD_PORT -j ACCEPT
+    
+    # Allow SlowDNS port (TCP & UDP)
+    iptables -A INPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT
+    iptables -A INPUT -p tcp --dport $SLOWDNS_PORT -j ACCEPT
+    iptables -A OUTPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT
+    
+    # Allow localhost traffic
+    iptables -A INPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
+    iptables -A OUTPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
     
     # Allow ICMP (ping)
     iptables -A INPUT -p icmp -j ACCEPT
+    
+    # Allow all outgoing connections
+    iptables -A OUTPUT -j ACCEPT
+    
+    # Drop invalid packets
+    iptables -A INPUT -m state --state INVALID -j DROP
+    
+    # SSH brute force protection
+    iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --set
+    iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
     
     # ALLOW ALL DNS TRAFFIC ON PORT 53 (TCP & UDP)
     iptables -A INPUT -p udp --dport 53 -j ACCEPT
@@ -101,14 +131,6 @@ configure_iptables() {
     # NAT REDIRECT: Redirect localhost DNS to SlowDNS
     iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-port 5300
     iptables -t nat -A OUTPUT -p tcp --dport 53 -j REDIRECT --to-port 5300
-    
-    # Allow all outgoing connections
-    iptables -A OUTPUT -j ACCEPT
-    
-    # Default policies
-    iptables -P INPUT DROP
-    iptables -P FORWARD DROP
-    iptables -P OUTPUT ACCEPT
     
     # Save rules
     iptables-save > /etc/iptables/rules.v4
@@ -221,6 +243,8 @@ Public Key: $(cat server.pub)
 Target Port: $target_port
 DNS Port: 53 → 5300
 Service Type: $(if [ "$service_type" = "c" ]; then echo "Screen Session"; else echo "System Service"; fi)
+SSH Port: $SSHD_PORT
+SlowDNS Port: $SLOWDNS_PORT
 EOF
     
     echo -e "${GREEN}Done${NC}"
