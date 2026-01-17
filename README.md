@@ -8,4 +8,4 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/athumani2580/DNSTT/
 dropbear
 
 
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/athumani2580/DNSTT/main/dnstt/deopbear.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/athumani2580/DNSTT/main/dnstt/dropbear.sh)"
