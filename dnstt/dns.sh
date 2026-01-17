@@ -225,7 +225,7 @@ if systemctl is-active --quiet server-dnstt; then
         
         # Try direct start
         pkill dnstt-server 2>/dev/null
-        /etc/slowdns/dnstt-server -udp :$SLOWDNS_PORT -mtu 1800 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
+        /etc/slowdns/dnstt-server -udp :$SLOWDNS_PORT -mtu 1232 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
         sleep 2
         
         if pgrep -x "dnstt-server" > /dev/null; then
